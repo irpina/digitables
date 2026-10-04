@@ -13,6 +13,13 @@
  * a pitch can change. After the last step it goes back to the loop point,
  * or holds the last step when the loop is off.
  *
+ * A step can instead ADD a note: reaching it starts a new note at the
+ * note's pitch plus the step's offset, and the note playing keeps its own
+ * (0, +4 ADD, +7 ADD at a fast speed: a strummed chord from one trig). The
+ * new note is a copy of the trig's note event (sound, p-locks, velocity,
+ * length) queued for the next block, the way the arpeggiator queues its
+ * notes, and it is released with the note that added it.
+ *
  * The TBL page is AMP's third page: press AMP until it shows, or hold a
  * track key (T1-T4) on its own for core-dn1's Mod Menu and pick TABLES.
  * Its knobs are sound parameters (core-dn1's
@@ -29,12 +36,19 @@
  *               24 PPQN tick, at any tempo
  *   0x800034c4  + 18 + 158 v + 2 k: voice v's parameter k (0x4009bec8)
  *   0x4138e220  the active kit; track t's sound slot k at + 0x2c + 326 t + 2 k
+ *   0x80001f74  the voices released in the render's last block (a bit each)
+ *   0x80003f14  + 4 v: voice v's length left, in timeline units (0 none);
+ *               the render releases the voice when it runs out
+ *   0x80003fc4  the transposition, plus track t's at 0x80003fc8 + 4 t
  */
 #define PITCH     ((volatile unsigned long *)0x41391f80)
 #define TIMELINE  (*(volatile unsigned long *)0x80004614)
 #define VPARAM(v, k) (*(volatile short *)(0x800034c4 + 18 + 158 * (v) + 2 * (k)))
 #define KIT       (*(volatile unsigned long *)0x4138e220)
 #define SOUND_SLOT(t, k) (*(volatile short *)(KIT + 0x2c + 326 * (t) + 2 * (k)))
+#define GATE_OFF  (*(volatile unsigned long *)0x80001f74)
+#define VLEN(v)   (*(volatile long *)(0x80003f14 + 4 * (v)))
+#define TRANSPOSE(t) (*(volatile long *)0x80003fc4 + *(volatile long *)(0x80003fc8 + 4 * (t)))
 
 #define TICK      900000UL      /* timeline units in one 24 PPQN tick */
 #define TBL_SLOT  26
@@ -52,7 +66,8 @@ struct table {
     signed char step[STEPS];
     unsigned char len;          /* 1-16 */
     unsigned char loop;         /* 0..len-1, or LOOP_OFF */
-    unsigned char pad[2];
+    unsigned short add;         /* the steps that add a note: bit i, step i + 1
+                                   (padding before 1.3, so 0 in older banks) */
 };
 
 struct table digitables_bank[TABLES];       /* global: the tests read it */
@@ -66,7 +81,7 @@ static void bank_defaults(void)
             digitables_bank[t].step[i] = 0;
         digitables_bank[t].len = STEPS;
         digitables_bank[t].loop = 0;
-        digitables_bank[t].pad[0] = digitables_bank[t].pad[1] = 0;
+        digitables_bank[t].add = 0;
     }
     for (i = 0; i < 4; i++)             /* table 1: an arpeggio to start */
         digitables_bank[0].step[i] = demo[i];
@@ -200,41 +215,179 @@ struct page_desc digitables_tbl_page = {
 extern int core_page_open(void *brain, void *event, long key, struct page_desc *page);
 extern int core_page_shown(void *brain, struct page_desc *page);
 
+/* ---- Note events (the render's queue) -----------------------------------
+ * A note event is 72 bytes (18 longs): +0 kind (0; 1 for the sequencer's
+ * prebuilt ones, whose p-lock list is not counted), +4 on, +8 track, +0x14
+ * the note count, +0x18 the notes (bytes, before transposition), +0x28
+ * flags (0x80000 an arpeggiator note, 0x40000 one aimed at a voice), +0x34
+ * the length (timeline units, 0 none: a key held), +0x38 the p-lock list,
+ * +0x40 the arpeggiator's, +0x44 the next in the queue. A p-lock list:
+ * +0 references, +8 the count, +0x14 entries of 8 bytes, the slot and the
+ * value (s16 each). Events and lists come from pools; the firmware resets
+ * the pools at times, so digitables keeps copies, never pointers. */
+#define EV_KIND   0
+#define EV_COUNT  5
+#define EV_FLAGS  10
+#define EV_LOCKS  14
+#define EV_ARP    16
+#define EV_NEXT   17
+#define EV_WORDS  18
+#define F_ARP     0x80000UL
+#define F_VOICE   0x40000UL
+#define LOCKS_MAX 79            /* one a sound slot */
+
+typedef unsigned long (*alloc_fn)(void);
+typedef void (*queue_fn)(unsigned long *ev, unsigned long time);
+typedef void (*free_fn)(unsigned long *ev);
+#define EV_ALLOC  ((alloc_fn)0x400ffd7e)    /* -> 0 when the pool is empty */
+#define EV_FREE   ((free_fn)0x400ffdb4)     /* and its p-lock list's reference */
+#define EV_QUEUE  ((queue_fn)0x400fff04)    /* at a time on the timeline */
+#define LOCK_ALLOC ((alloc_fn)0x400ffd2e)   /* no check: test LOCKS_FREE first */
+#define LOCKS_FREE (*(volatile unsigned long *)0x419ed230)  /* the free lists */
+#define NODES_FREE (*(volatile unsigned long *)0x419ed234)  /* of p-lock lists
+                        and of the queue's times (with none left, queueing
+                        at a new time never returns) */
+
 /* ---- The voices ---------------------------------------------------------- */
-enum { IDLE, PENDING, PLAYING };
+enum { IDLE, PENDING, PLAYING, ADDED };
 
 struct voice {
     unsigned long base;         /* the pitch word the note started with */
     unsigned long last;         /* the timeline at the last block */
     unsigned long phase;        /* timeline units into the current step */
     unsigned short n;           /* the step it is on */
-    signed char step;           /* the step last written, -1 none */
-    signed char off;            /* the offset written with it */
+    signed char step;           /* the step last reached, -1 none */
+    signed char off;            /* the offset written */
     unsigned char state;
     unsigned char track;
     unsigned char tbl;          /* the table, 0-15 */
+    unsigned char pstep;        /* the step whose offset it plays */
+    unsigned char gen;          /* counts the voice's notes */
+    unsigned char can_add;      /* its note event is in tmpl */
+    unsigned char released;     /* its note was released: adds no more */
+    unsigned char parent, pgen; /* ADDED: the voice and note that added it */
 };
 
 struct voice digitables_voices[VOICES];     /* global: the tests read it */
+
+/* Each voice's note event, to add notes from: the event without its
+ * p-lock list, and the list's entries (slot << 16 | value). */
+static unsigned long tmpl[VOICES][EV_WORDS];
+static unsigned long tmpl_locks[VOICES][LOCKS_MAX];
+static unsigned char tmpl_nlocks[VOICES];
+
+/* The notes added in this block, to know their voices when they start (in
+ * the next block's render, before its ev_render_out). */
+#define PEND      8
+static struct {
+    unsigned long *ev;
+    unsigned char track, note, voice, gen;
+} pend[PEND];
+static int npend;
+unsigned long digitables_added, digitables_add_fails;   /* for the tests */
 
 /* What each track's latest note plays, for the editor: table + 1 (0 none)
  * and step. */
 volatile unsigned char digitables_play_tbl[SYNTHS], digitables_play_step[SYNTHS];
 
+static void take_event(int v, const unsigned long *ev)
+{
+    const unsigned long *locks = (const unsigned long *)ev[EV_LOCKS];
+    int i, n = 0;
+    for (i = 0; i < EV_WORDS; i++)
+        tmpl[v][i] = ev[i];
+    tmpl[v][EV_KIND] = 0;
+    tmpl[v][EV_LOCKS] = 0;
+    tmpl[v][EV_ARP] = 0;
+    tmpl[v][EV_NEXT] = 0;
+    tmpl[v][EV_FLAGS] &= ~(F_ARP | F_VOICE);
+    if (locks) {
+        n = (int)locks[2];
+        if (n < 0)
+            n = 0;
+        else if (n > LOCKS_MAX)
+            n = LOCKS_MAX;
+        for (i = 0; i < n; i++)
+            tmpl_locks[v][i] = locks[5 + 2 * i];
+    }
+    tmpl_nlocks[v] = (unsigned char)n;
+    digitables_voices[v].can_add = 1;
+}
+
 void digitables_voice_on(int voice, int track, void *event)
 {
+    const unsigned long *ev = event;
     struct voice *s;
-    (void)event;
+    int i;
     if ((unsigned)voice >= VOICES)
         return;
     s = &digitables_voices[voice];
+    s->gen++;
     s->base = PITCH[voice];
     s->last = TIMELINE;
     s->phase = 0;
     s->n = 0;
     s->step = -1;
+    s->pstep = 0;
     s->track = (unsigned char)track;
+    s->can_add = 0;
+    s->released = 0;
+    for (i = 0; i < npend; i++)         /* a note a table added */
+        if (pend[i].ev == ev && pend[i].track == track && ev[EV_COUNT] == 1
+            && ((const unsigned char *)ev)[0x18] == pend[i].note) {
+            s->state = ADDED;
+            s->parent = pend[i].voice;
+            s->pgen = pend[i].gen;
+            return;
+        }
     s->state = (unsigned)track < SYNTHS ? PENDING : IDLE;
+    if (s->state == PENDING && ev && !(ev[EV_FLAGS] & F_ARP))
+        take_event(voice, ev);
+}
+
+/* Add a note to voice v's: a copy of its note event, one note, pitch + off,
+ * queued for the next block. */
+static void add_note(int v, struct voice *s, int off)
+{
+    unsigned long *e, *l;
+    int pitch = (int)(s->base >> 16) + off, note, i;
+    note = pitch - (int)TRANSPOSE(s->track);
+    if (pitch < 0 || pitch > 127 || note < 0 || note > 127 || npend >= PEND
+        || !NODES_FREE || !(e = (unsigned long *)EV_ALLOC())) {
+        digitables_add_fails++;
+        return;
+    }
+    for (i = 0; i < EV_WORDS; i++)
+        e[i] = tmpl[v][i];
+    e[EV_COUNT] = 1;
+    ((unsigned char *)e)[0x18] = (unsigned char)note;
+    if (tmpl_nlocks[v]) {
+        if (!LOCKS_FREE) {
+            EV_FREE(e);
+            digitables_add_fails++;
+            return;
+        }
+        l = (unsigned long *)LOCK_ALLOC();
+        l[2] = tmpl_nlocks[v];
+        for (i = 0; i < tmpl_nlocks[v]; i++)
+            l[5 + 2 * i] = tmpl_locks[v][i];
+        e[EV_LOCKS] = (unsigned long)l;
+    }
+    EV_QUEUE(e, TIMELINE);
+    pend[npend].ev = e;
+    pend[npend].track = s->track;
+    pend[npend].note = (unsigned char)note;
+    pend[npend].voice = (unsigned char)v;
+    pend[npend].gen = s->gen;
+    npend++;
+    digitables_added++;
+}
+
+/* Release a voice: its length runs out in the next block's render. */
+static void release(int v)
+{
+    VLEN(v) = 1;
+    digitables_voices[v].state = IDLE;
 }
 
 static int table_len(const struct table *t)
@@ -269,16 +422,56 @@ static unsigned long step_len(int v)
     return TICK / spd_div[-spd - 1];
 }
 
+static void set_pitch(int v, struct voice *s, int off)
+{
+    int note = (int)(s->base >> 16) + off;
+    if (note < 0)
+        note = 0;
+    else if (note > 127)
+        note = 127;
+    s->off = (signed char)off;
+    PITCH[v] = ((unsigned long)note << 16) | (s->base & 0xFFFF);
+}
+
 void digitables_render_out(void)
 {
-    unsigned long now = TIMELINE;
-    int v;
+    unsigned long now = TIMELINE, off = GATE_OFF;
+    int v, c;
+    npend = 0;                          /* last block's added notes started */
+    /* Notes released in this block: those with a table add no more, and the
+     * notes they added go with them. */
+    for (v = 0; v < VOICES; v++) {
+        struct voice *s = &digitables_voices[v];
+        if (!(off & (1UL << v)) || s->state == IDLE)
+            continue;
+        if (s->state == ADDED) {
+            s->state = IDLE;
+            continue;
+        }
+        if (s->released)
+            continue;
+        s->released = 1;
+        for (c = 0; c < VOICES; c++)
+            if (digitables_voices[c].state == ADDED && digitables_voices[c].parent == v
+                && digitables_voices[c].pgen == s->gen && !(off & (1UL << c)))
+                release(c);
+    }
+    /* Added notes whose voice went on to another note: one without a
+     * length (a key held) is released, one with a length plays it out. */
+    for (c = 0; c < VOICES; c++) {
+        struct voice *a = &digitables_voices[c];
+        if (a->state == ADDED && digitables_voices[a->parent].gen != a->pgen) {
+            if (VLEN(c) == 0)
+                release(c);
+            a->state = IDLE;
+        }
+    }
     for (v = 0; v < VOICES; v++) {
         struct voice *s = &digitables_voices[v];
         const struct table *t;
         unsigned long len;
-        int step, note;
-        if (s->state == IDLE)
+        int step;
+        if (s->state == IDLE || s->state == ADDED)
             continue;
         if (s->state == PENDING) {
             /* The sound and the step's locks are loaded now. */
@@ -311,17 +504,21 @@ void digitables_render_out(void)
             digitables_play_tbl[s->track] = (unsigned char)(s->tbl + 1);
             digitables_play_step[s->track] = (unsigned char)step;
         }
-        /* A new step, or this step edited meanwhile: write the note. */
-        if (step == s->step && t->step[step] == s->off)
-            continue;
-        s->step = (signed char)step;
-        s->off = t->step[step];
-        note = (int)(s->base >> 16) + s->off;
-        if (note < 0)
-            note = 0;
-        else if (note > 127)
-            note = 127;
-        PITCH[v] = ((unsigned long)note << 16) | (s->base & 0xFFFF);
+        /* A new step: an add step adds a note and the voice keeps its own;
+         * any other (and the first) sets the voice's note. */
+        if (step != s->step) {
+            int first = s->step < 0;
+            s->step = (signed char)step;
+            if (!first && ((t->add >> step) & 1)) {
+                if (s->can_add && !s->released)
+                    add_note(v, s, t->step[step]);
+                continue;
+            }
+            s->pstep = (unsigned char)step;
+            set_pitch(v, s, t->step[step]);
+        } else if (t->step[s->pstep] != s->off) {   /* edited meanwhile */
+            set_pitch(v, s, t->step[s->pstep]);
+        }
     }
 }
 
@@ -404,6 +601,8 @@ static int editor_key(unsigned long key, unsigned long flags)
         clamp_step(t, digitables_ed_step, t->step[digitables_ed_step] + fine);
     } else if (key == KEY_DOWN) {
         clamp_step(t, digitables_ed_step, t->step[digitables_ed_step] - fine);
+    } else if (key == KEY_YES) {                /* the step adds a note, or not */
+        t->add ^= (unsigned short)(1u << digitables_ed_step);
     }
     return 1;
 }
@@ -444,7 +643,8 @@ const struct {
 
 /* Knobs (core's ev_enc): +12 the encoder, 1-8 for A-H; +16 the turn. In the
  * editor: A the step's offset, B the step, C the length, D the loop point
- * (OFF, 1..length), H the table. */
+ * (OFF, 1..length), H the table. YES (editor_key) makes the step an add
+ * step, or not. */
 int digitables_enc(void *brain, void *ev)
 {
     unsigned long e = EV_ENC(ev);
@@ -531,12 +731,11 @@ void digitables_draw(void *bmp, void *ctrl)
         else if (h < -BAR_H)
             h = -BAR_H;
         if (i < t->len) {
-            if (h > 0)
-                FILLRECT(bmp, x0 + 2, ZERO_Y, x0 + 5, ZERO_Y + h, 1);
-            else if (h < 0)
-                FILLRECT(bmp, x0 + 2, ZERO_Y + h, x0 + 5, ZERO_Y, 1);
+            int y0 = h < 0 ? ZERO_Y + h : ZERO_Y, y1 = h > 0 ? ZERO_Y + h : ZERO_Y;
+            if ((t->add >> i) & 1)                      /* an add step: hollow */
+                FRAMERECT(bmp, x0 + 2, h ? y0 : y0 - 1, x0 + 5, h ? y1 : y1 + 1, 1);
             else
-                FILLRECT(bmp, x0 + 2, ZERO_Y, x0 + 5, ZERO_Y, 1);
+                FILLRECT(bmp, x0 + 2, y0, x0 + 5, y1, 1);
             if (over)                                   /* past the scale */
                 FILLRECT(bmp, x0 + 3, ZERO_Y + h - (h > 0 ? 1 : -1),
                          x0 + 4, ZERO_Y + h - (h > 0 ? 1 : -1), 0);
@@ -553,4 +752,6 @@ void digitables_draw(void *bmp, void *ctrl)
     v = t->step[digitables_ed_step];
     TEXTF(bmp, FONT5, 1, 1, -1, "STEP %02d  NOTE %c%02d", digitables_ed_step + 1,
           v < 0 ? '-' : '+', v < 0 ? -v : v);
+    if ((t->add >> digitables_ed_step) & 1)
+        TEXTF(bmp, FONT5, 100, 1, -1, "ADD");
 }
