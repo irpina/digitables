@@ -1,0 +1,35 @@
+{
+ "id": "digitables",
+ "version": "1.2",
+ "title": "digitables",
+ "category": "Sequencer",
+ "license": "GPL-2.0-or-later",
+ "author": "irpina",
+ "description": "M8-style pitch tables: 16 tables of up to 16 semitone steps, with a length and a loop point, saved with the project. Each note restarts its sound's table and the sequencer's clock steps it. The TBL page (AMP's third page, or TABLES in core-dn1's Mod Menu: hold a track key) has TBL, the table per sound and per trig with p-locks, and SPD, the ticks of 24 PPQN a step, or a fraction of a tick down to a step every audio block (MAX, 1500 a second); hold a track key there for the table editor. Needs core-dn1 2.2.",
+ "device": "digitone-mk1",
+ "os": "1.43",
+ "sources": ["digitables.c"],
+ "subscribe": [
+  {"event": "ev_voice_on", "fn": "digitables_voice_on", "order": 50},
+  {"event": "ev_render_out", "fn": "digitables_render_out", "order": 50},
+  {"event": "ev_key", "fn": "digitables_key", "order": 50},
+  {"event": "ev_enc", "fn": "digitables_enc", "order": 50},
+  {"event": "ev_tick", "fn": "digitables_tick", "order": 50},
+  {"event": "ev_draw", "fn": "digitables_draw", "order": 50},
+  {"event": "ev_hold", "fn": "digitables_hold", "order": 50}
+ ],
+ "contribute": [
+  {"to": "core_params", "order": 50, "data": "00000000",
+   "relocs": [[0, "abs32", "sym:digitables_tbl_param", 0]]},
+  {"to": "core_params", "order": 51, "data": "00000000",
+   "relocs": [[0, "abs32", "sym:digitables_spd_param", 0]]},
+  {"to": "core_pages", "order": 50, "data": "00000000",
+   "relocs": [[0, "abs32", "sym:digitables_tbl_page", 0]]},
+  {"to": "core_projdata", "order": 50, "data": "00000000",
+   "relocs": [[0, "abs32", "sym:digitables_projdata", 0]]},
+  {"to": "core_menu", "order": 50, "data": "00000000",
+   "relocs": [[0, "abs32", "sym:digitables_menu", 0]]}
+ ],
+ "resources": {"names": ["param:182", "param:183", "page:27", "projdata:TBL1"]},
+ "requires": ["core"]
+}
