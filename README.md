@@ -9,12 +9,13 @@ arpeggio, a trill, a pitch drop or a riff, from a slow walk to a buzz at
 so one trig can strum a chord.
 
 It is an [elekloader](https://github.com/irpina/elekloader) mod for Digitone
-OS 1.43. elekloader builds a custom OS file on your own machine, from your
+OS 1.43 and 1.44. elekloader builds a custom OS file on your own machine, from your
 stock OS file and the mods you pick; nothing from Elektron is distributed.
 
 **Status.** The TBL page, the editor, playback, the fast speeds (1.1) and
 the ADD steps (1.3, with core-dn1 2.2's Mod Menu) have run on a Digitone.
-The Digitone Keys runs the same OS file but has not been tried.
+The Digitone Keys runs the same OS file but has not been tried. On OS 1.44
+(1.4, on core-dn1 3.0) it has run in an emulator only.
 
 ## What it does
 
@@ -34,6 +35,21 @@ Both are sound parameters: saved with the kit, shown and edited like the
 stock ones, and p-lockable per trig (hold a trig in grid recording and turn
 the knob), so one trig can play another table, or none, or at another speed.
 Turning SPD while a note plays changes its speed from the next step.
+
+### An LFO on the speed
+
+Both LFOs can move the table's speed. On the LFO page, turn DEST to
+**AMP:Table Speed** (the last entry in the list) and confirm with YES. The
+LFO's own SPD, MULT, WAVE, SPH, MODE and FADE work as for any destination.
+DEP sets how far it moves SPD, in proportion to its range as on a stock
+parameter: DEP 8 swings SPD 2 values either way, DEP 32 eight, and the full
+DEP (64) sixteen, so from SPD 6 an LFO reaches both ends, 22 ticks a step
+and MAX. Positive DEP slows the table on the top half of the wave and speeds
+it up on the bottom half; negative DEP does the opposite.
+
+A slow sine at a small depth makes a table drift ahead of the beat and back;
+a square wave flips between two speeds; a ramp with MODE TRIG makes every
+note start fast and slow down, or the other way round.
 
 ### The table editor
 
@@ -108,23 +124,25 @@ You need:
     unzip it and run `elekloader.exe`.
   - **Other systems:** run elekloader from source with Python 3.9 or newer
     (see [its README](https://github.com/irpina/elekloader#install)).
-- **This mod and its core:** `digitables-1.3.elemod` and
-  `core-dn1-2.2.elemod`, from
-  [this repository's releases](https://github.com/irpina/digitables/releases/latest).
-  digitables needs core-dn1 2.2 (its parameter slots, mod pages, project
-  data and Mod Menu), which elekloader's releases do not have yet: the
-  apps bundle core-dn1 2.0a. Install the 2.2 core from here until they do.
-- **The stock OS file:** `Digitone_and_Digitone_Keys_OS1.43.syx`, from
+- **This mod and its core,** from
+  [this repository's releases](https://github.com/irpina/digitables/releases/latest):
+  `digitables-1.4.elemod` and `core-dn1-3.0.elemod` for OS 1.43, or
+  `digitables-1.4-os1.44.elemod` and `core-dn1-3.0-os1.44.elemod` for 1.44.
+  digitables needs core-dn1 3.0: its parameter slots, mod pages, project
+  data and Mod Menu (2.1-2.3), and from 3.0 the firmware locations it
+  uses, which let one source build for both OS versions. elekloader's
+  releases do not have core-dn1 3.0 yet: install it from here until they do.
+- **The stock OS file:** `Digitone_and_Digitone_Keys_OS1.44.syx` or
+  `..._OS1.43.syx`, from
   [Elektron's Digitone downloads](https://www.elektron.se/support-downloads/digitone).
-  The mod is for OS 1.43 only; elekloader recognises the file by its hash.
+  elekloader recognises the file by its hash.
 
 Then build your OS in elekloader's window:
 
-1. **Change stock firmware...** (top right): choose
-   `Digitone_and_Digitone_Keys_OS1.43.syx`.
-2. **+ Install from file...**: choose `core-dn1-2.2.elemod`, then
-   `digitables-1.3.elemod`.
-3. **Tick digitables.** Make sure the core ticked with it is **core 2.2**
+1. **Change stock firmware...** (top right): choose your stock OS file.
+2. **+ Install from file...**: choose the core and digitables files for
+   that OS version.
+3. **Tick digitables.** Make sure the core ticked with it is **core 3.0**
    (untick core 2.0a if it is ticked). The check below the list should say
    "No conflicts ... Ready to build". It links with
    [digihealth](https://github.com/irpina/digihealth) 1.1 too (checked by
@@ -142,9 +160,9 @@ the upgrade is done.
 Or on the command line (elekloader from source):
 
 ```bash
-python -m elekloader.patch --stock Digitone_and_Digitone_Keys_OS1.43.syx \
-    --mod core-dn1-2.2.elemod --mod digitables-1.3.elemod \
-    --out Digitone_OS1.43-digitables.syx --version TB12
+python -m elekloader.patch --stock Digitone_and_Digitone_Keys_OS1.44.syx \
+    --mod core-dn1-3.0-os1.44.elemod --mod digitables-1.4-os1.44.elemod \
+    --out Digitone_OS1.44-digitables.syx --version TB14
 ```
 
 **Recovery:** elekloader never changes the bootloader, so the stock OS
@@ -158,17 +176,22 @@ With elekloader's SDK and the m68k cross compiler (elekloader's README
 says how to get them):
 
 ```bash
-python -m elekloader.sdk.build path/to/digitables --stock Digitone_and_Digitone_Keys_OS1.43.syx
-python -m elekloader.lint path/to/digitables/out/digitables-1.3.elemod \
-    --stock Digitone_and_Digitone_Keys_OS1.43.syx --with core-dn1-2.2.elemod
+python -m elekloader.sdk.build path/to/digitables --stock Digitone_and_Digitone_Keys_OS1.43.syx   # digitables-1.4.elemod
+python -m elekloader.sdk.build path/to/digitables --stock Digitone_and_Digitone_Keys_OS1.44.syx   # digitables-1.4-os1.44.elemod
+python -m elekloader.lint path/to/digitables/out/digitables-1.4.elemod \
+    --stock Digitone_and_Digitone_Keys_OS1.43.syx --with core-dn1-3.0.elemod
 ```
 
-core-dn1 2.2 is elekloader's `mods/core-dn1` (pull requests
-[#34](https://github.com/irpina/elekloader/pull/34) and
-[#35](https://github.com/irpina/elekloader/pull/35)).
+core-dn1 3.0 is elekloader's `mods/core-dn1`. The source names no firmware
+address: it includes `digitone-mk1/core3.h` from elekloader's SDK, and the
+core in the build gives each address for its OS, so the 1.44 port in
+`mod.json` is empty.
 
 ## What it uses
 
+- core-dn1 3.0's firmware locations (`fw_*`): the voices' pitch words,
+  parameters and lengths, the timeline, the transposition, the LFOs, the
+  note queue, the kit, the sound slot table and the drawing routines;
 - core-dn1's events: `ev_voice_on` (a note starts: the table restarts, or
   an added note is recognised),
   `ev_render_out` (every audio block: the steps, written to the voices'
@@ -183,7 +206,13 @@ core-dn1 2.2 is elekloader's `mods/core-dn1` (pull requests
   copy of the trig's note event, the way the arpeggiator queues its notes,
   and released through the voice's length counter. digitables keeps its
   own copy of the event and its p-locks (never a pointer into the
-  firmware's pools), and skips the note when a pool is short.
+  firmware's pools), and skips the note when a pool is short;
+- for the LFOs: SPD's record carries the filter's modulation-destination
+  mask, and digitables maps sound slot 65 to SPD in the firmware's sound slot
+  table (the DEST lists are made from it; the firmware builds it once, at
+  boot, from its own parameters only). The firmware's LFO engine then
+  keeps each voice's LFO destination and modulation every block, and
+  digitables adds the modulation to SPD itself.
 
 ## Known limits
 
@@ -197,7 +226,10 @@ core-dn1 2.2 is elekloader's `mods/core-dn1` (pull requests
   an added note takes one like any note (the oldest is stolen when none is
   free). A loop over ADD steps adds notes over and over, stealing voices
   as it goes.
-- OS 1.43 only (core-dn1 2.2 has OS 1.44 too; digitables does not yet).
+- Only the LFOs move SPD. The velocity and MIDI controller modulation lists
+  offer Table Speed too (the firmware has one mask for them and LFO1), but
+  choosing it there does nothing yet.
+- On OS 1.44 it has run in an emulator only, not yet on a unit.
 
 ## Licence
 

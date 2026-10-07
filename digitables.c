@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later
  * Copyright (C) 2026 irpina and contributors */
-/* digitables: M8-style pitch tables for the Digitone mk1, OS 1.43.
+/* digitables: M8-style pitch tables for the Digitone mk1, OS 1.43 and 1.44.
  *
  * A table is up to 16 steps of semitone offsets, with a length and a loop
  * point; the project has 16 of them (the bank), saved and loaded with it.
@@ -20,6 +20,9 @@
  * length) queued for the next block, the way the arpeggiator queues its
  * notes, and it is released with the note that added it.
  *
+ * Both LFOs can move SPD: the LFO pages' DEST lists offer it ("AMP:Table
+ * Speed"), and each block digitables adds the LFO's modulation to it.
+ *
  * The TBL page is AMP's third page: press AMP until it shows, or hold a
  * track key (T1-T4) on its own for core-dn1's Mod Menu and pick TABLES.
  * Its knobs are sound parameters (core-dn1's
@@ -30,25 +33,29 @@
  *           and faster below 1: 1/2 ... 1/32 of a tick (-1..-9), MAX (-10)
  * Hold a track key on the TBL page for the table editor (below).
  *
- * Addresses are OS 1.43's:
- *   0x41391f80  the voices' pitch words, note << 16
- *   0x80004614  the render's timeline: 5,400,000 units a 16th, 900,000 a
- *               24 PPQN tick, at any tempo
- *   0x800034c4  + 18 + 158 v + 2 k: voice v's parameter k (0x4009bec8)
- *   0x4138e220  the active kit; track t's sound slot k at + 0x2c + 326 t + 2 k
- *   0x80001f74  the voices released in the render's last block (a bit each)
- *   0x80003f14  + 4 v: voice v's length left, in timeline units (0 none);
- *               the render releases the voice when it runs out
- *   0x80003fc4  the transposition, plus track t's at 0x80003fc8 + 4 t
+ * It names no firmware address: the firmware's data and routines it uses
+ * are core-dn1 3.0's exports (fw_*, digitone-mk1/core3.h), which each OS's
+ * core gives, so the same source builds for OS 1.43 and 1.44:
+ *   fw_voice_pitch   the voices' pitch words, note << 16
+ *   fw_timeline      the render's timeline: 5,400,000 units a 16th, 900,000
+ *                    a 24 PPQN tick, at any tempo
+ *   fw_voice_params  the render's copy of each voice's sound (slot k of v)
+ *   fw_kit           the active kit; track t's sound slot k at + 0x2c + 326 t + 2 k
+ *   fw_gate_off      the voices released in the render's last block (a bit each)
+ *   fw_voice_len     voice v's length left, in timeline units (0 none); the
+ *                    render releases the voice when it runs out
+ *   fw_transpose     the transposition, then each track's
  */
-#define PITCH     ((volatile unsigned long *)0x41391f80)
-#define TIMELINE  (*(volatile unsigned long *)0x80004614)
-#define VPARAM(v, k) (*(volatile short *)(0x800034c4 + 18 + 158 * (v) + 2 * (k)))
-#define KIT       (*(volatile unsigned long *)0x4138e220)
+#include "digitone-mk1/core3.h"
+
+#define PITCH     ((volatile unsigned long *)fw_voice_pitch)
+#define TIMELINE  (*(volatile unsigned long *)&fw_timeline)
+#define VPARAM(v, k) (*(volatile short *)((unsigned long)fw_voice_params + 18 + 158 * (v) + 2 * (k)))
+#define KIT       (*(volatile unsigned long *)&fw_kit)
 #define SOUND_SLOT(t, k) (*(volatile short *)(KIT + 0x2c + 326 * (t) + 2 * (k)))
-#define GATE_OFF  (*(volatile unsigned long *)0x80001f74)
-#define VLEN(v)   (*(volatile long *)(0x80003f14 + 4 * (v)))
-#define TRANSPOSE(t) (*(volatile long *)0x80003fc4 + *(volatile long *)(0x80003fc8 + 4 * (t)))
+#define GATE_OFF  (*(volatile unsigned long *)&fw_gate_off)
+#define VLEN(v)   (*(volatile long *)((unsigned long)fw_voice_len + 4 * (v)))
+#define TRANSPOSE(t) (*(volatile long *)fw_transpose + *(volatile long *)((unsigned long)fw_transpose + 4 + 4 * (t)))
 
 #define TICK      900000UL      /* timeline units in one 24 PPQN tick */
 #define TBL_SLOT  26
@@ -133,8 +140,8 @@ const struct {
 #define SPD_MAX   23                    /* 24 ticks a step */
 /* Faster than a tick (the slot at -1..-9): a step every 1/2 ... 1/32 of one. */
 static const unsigned char spd_div[] = {2, 3, 4, 6, 8, 12, 16, 24, 32};
-#define STR_AMP   ((const char *)0x401d63c3)   /* the firmware's "Amp" */
-#define STR_EMPTY ((const char *)0x401ddbcd)   /* its empty string */
+#define STR_AMP   fw_str_amp            /* the firmware's "Amp" */
+#define STR_EMPTY fw_str_empty          /* its empty string */
 #define LOOK_PTIM 24            /* a plain knob, whole steps (core-dn1) */
 
 struct param {
@@ -177,7 +184,15 @@ void digitables_spd_format(int value, char *buf)
     }
 }
 
-/* core_params' entries: the id, the 60-byte record, the knob it borrows. */
+/* core_params' entries: the id, the 60-byte record, the knob it borrows.
+ * The tenth field is the record's mod-destination mask: a DEST list offers
+ * a parameter whose mask has all its bits, LFO1's 0xe00, LFO2's 0x600, the
+ * velocity and controller lists 0x200 (0x40045110, 0x400c7dc6). SPD has
+ * 0xe00, as the filter's and the synth's parameters: with its slot in the
+ * sound slot table (map_slots), both LFOs offer it, "AMP:Table Speed". The
+ * velocity and controller lists offer it too, but they modulate only the
+ * render's copy of the slot, which digitables does not read. */
+#define MOD_DEST  0xe00
 const struct {
     long id;
     struct param rec;
@@ -189,8 +204,8 @@ const struct {
     LOOK_PTIM
 }, digitables_spd_param = {
     SPD_ID,
-    { 1, SPD_SLOT, SPD_MIN * 256, SPD_MAX << 8, 0, 0, -1, -1, -1, 0,
-      "Speed", STR_AMP, "SPD", digitables_spd_format, STR_EMPTY },
+    { 1, SPD_SLOT, SPD_MIN * 256, SPD_MAX << 8, 0, 0, -1, -1, -1, MOD_DEST,
+      "Table Speed", STR_AMP, "SPD", digitables_spd_format, STR_EMPTY },
     LOOK_PTIM
 };
 
@@ -212,8 +227,7 @@ struct page_desc digitables_tbl_page = {
     0, 0
 };
 
-extern int core_page_open(void *brain, void *event, long key, struct page_desc *page);
-extern int core_page_shown(void *brain, struct page_desc *page);
+/* core_page_open and core_page_shown: digitone-mk1/core3.h */
 
 /* ---- Note events (the render's queue) -----------------------------------
  * A note event is 72 bytes (18 longs): +0 kind (0; 1 for the sequencer's
@@ -239,12 +253,12 @@ extern int core_page_shown(void *brain, struct page_desc *page);
 typedef unsigned long (*alloc_fn)(void);
 typedef void (*queue_fn)(unsigned long *ev, unsigned long time);
 typedef void (*free_fn)(unsigned long *ev);
-#define EV_ALLOC  ((alloc_fn)0x400ffd7e)    /* -> 0 when the pool is empty */
-#define EV_FREE   ((free_fn)0x400ffdb4)     /* and its p-lock list's reference */
-#define EV_QUEUE  ((queue_fn)0x400fff04)    /* at a time on the timeline */
-#define LOCK_ALLOC ((alloc_fn)0x400ffd2e)   /* no check: test LOCKS_FREE first */
-#define LOCKS_FREE (*(volatile unsigned long *)0x419ed230)  /* the free lists */
-#define NODES_FREE (*(volatile unsigned long *)0x419ed234)  /* of p-lock lists
+#define EV_ALLOC  ((alloc_fn)fw_ev_alloc)   /* -> 0 when the pool is empty */
+#define EV_FREE   ((free_fn)fw_ev_free)     /* and its p-lock list's reference */
+#define EV_QUEUE  ((queue_fn)fw_ev_queue)   /* at a time on the timeline */
+#define LOCK_ALLOC ((alloc_fn)fw_lock_alloc)   /* no check: test LOCKS_FREE first */
+#define LOCKS_FREE (*(volatile unsigned long *)&fw_locks_free)  /* the free lists */
+#define NODES_FREE (*(volatile unsigned long *)&fw_nodes_free)  /* of p-lock lists
                         and of the queue's times (with none left, queueing
                         at a new time never returns) */
 
@@ -408,11 +422,46 @@ static int table_next(const struct table *t, int n)
     return t->loop;
 }
 
+/* ---- The LFOs on SPD -----------------------------------------------------
+ * The firmware's LFO engine (0x400feaee, in the render, every block) runs
+ * each voice's two LFOs and keeps, in each LFO's state, its destination
+ * slot (+0x40) and its modulation in 8.8 parameter units (+0x44, signed);
+ * LFO1's state is at fw_lfo_state + 0x50 v, LFO2's 0x28 after it. It also adds
+ * the modulation into the render's copy of the slot, clamped to 0..127,
+ * which would cut off SPD's fast end (stored below 0); digitables takes the
+ * amount itself instead. The amount at full DEP (64) is 64 parameter steps
+ * either way, half a stock parameter's range; digitables takes a quarter,
+ * 16 of SPD's 34 values either way, half its range, as on a stock one. */
+#define SLOT_IDS  ((volatile unsigned long *)fw_slot_ids)   /* sound slot -> id */
+#define LFO_STATE(v, i) ((volatile long *)((unsigned long)fw_lfo_state + 0x50 * (v) + 0x28 * (i)))
+#define LFO_DEST  (0x40 / 4)
+#define LFO_AMOUNT (0x44 / 4)
+
+/* The DEST lists offer what the sound slot table (built once, at boot, from
+ * the firmware's own parameters) maps; SPD's slot maps to nothing until
+ * digitables puts its id there. */
+static void map_slots(void)
+{
+    if (SLOT_IDS[SPD_SLOT] == 0)
+        SLOT_IDS[SPD_SLOT] = SPD_ID;
+}
+
+static long lfo_spd(int v)
+{
+    long m = 0;
+    int i;
+    for (i = 0; i < 2; i++)
+        if (LFO_STATE(v, i)[LFO_DEST] == SPD_SLOT)
+            m += LFO_STATE(v, i)[LFO_AMOUNT];
+    return m / 4;
+}
+
 /* Timeline units a step for voice v, or 0 for a step every audio block.
- * Read every block: turning SPD while a note plays changes its speed. */
+ * Read every block: turning SPD, or an LFO on it, changes the speed of a
+ * note already playing. */
 static unsigned long step_len(int v)
 {
-    int spd = VPARAM(v, SPD_SLOT) >> 8;
+    long spd = (VPARAM(v, SPD_SLOT) + lfo_spd(v) + 128) >> 8;
     if (spd > SPD_MAX)
         spd = SPD_MAX;
     if (spd >= 0)
@@ -636,10 +685,19 @@ void digitables_menu_open(void *brain, void *ev, int track)
     core_page_open(brain, ev, KEY_AMP, &digitables_tbl_page);
 }
 
+/* Its icon in core-dn1 2.3's grid: 16 rows, bit 15 the left pixel; table
+ * 1's default, 0 +12 +7 +3, as bars. Core 2.2 reads only the name and open. */
+static const unsigned short digitables_icon[16] = {
+    0x0000, 0x0e00, 0x0e00, 0x0e00, 0x0e00, 0x0ee0, 0x0ee0, 0x0ee0,
+    0x0eee, 0x0eee, 0x0eee, 0xeeee, 0xeeee, 0x0000, 0xffff, 0x0000
+};
+
 const struct {
     const char *name;
     void (*open)(void *brain, void *ev, int track);
-} digitables_menu = { "TABLES", digitables_menu_open };
+    unsigned long tag;                  /* 0x49434F4E, "ICON": an icon follows */
+    const unsigned short *icon;
+} digitables_menu = { "TABLES", digitables_menu_open, 0x49434F4EUL, digitables_icon };
 
 /* Knobs (core's ev_enc): +12 the encoder, 1-8 for A-H; +16 the turn. In the
  * editor: A the step's offset, B the step, C the length, D the loop point
@@ -685,14 +743,14 @@ int digitables_enc(void *brain, void *ev)
 }
 
 /* ---- Drawing the editor (core's ev_tick, ev_draw) ----------------------
- * Stock drawing routines (OS 1.43, digihealth's dn143.inc); the bitmap's
+ * Stock drawing routines (core-dn1 3.0's exports); the bitmap's
  * y = 0 is the bottom row, the screen 128 x 64. */
 typedef void (*rect_fn)(void *bmp, int x0, int y0, int x1, int y1, int colour);
 typedef void (*text_fn)(void *bmp, const void *font, int x, int y, int maxlen, const char *fmt, ...);
-#define FILLRECT  ((rect_fn)0x400dd292)
-#define FRAMERECT ((rect_fn)0x400dd076)
-#define TEXTF     ((text_fn)0x400dde68)
-#define FONT5     ((const void *)0x402315c8)
+#define FILLRECT  ((rect_fn)fw_fillrect)
+#define FRAMERECT ((rect_fn)fw_framerect)
+#define TEXTF     ((text_fn)fw_textf)
+#define FONT5     ((const void *)fw_font5)
 
 #define ZERO_Y    31            /* the graph's zero line */
 #define BAR_H     20            /* a pixel a semitone, up to this; past it a notch */
@@ -703,6 +761,7 @@ void digitables_tick(void *ctrl)
         bank_defaults();                /* the first boot's install */
         bank_ready = 1;
     }
+    map_slots();
     if (digitables_ed_open)
         *((unsigned char *)ctrl + 0x20) = 1;    /* redraw: the playhead moves */
 }
