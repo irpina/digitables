@@ -20,6 +20,9 @@
  * length) queued for the next block, the way the arpeggiator queues its
  * notes, and it is released with the note that added it.
  *
+ * Both LFOs can move SPD: the LFO pages' DEST lists offer it ("AMP:Table
+ * Speed"), and each block digitables adds the LFO's modulation to it.
+ *
  * The TBL page is AMP's third page: press AMP until it shows, or hold a
  * track key (T1-T4) on its own for core-dn1's Mod Menu and pick TABLES.
  * Its knobs are sound parameters (core-dn1's
@@ -177,7 +180,15 @@ void digitables_spd_format(int value, char *buf)
     }
 }
 
-/* core_params' entries: the id, the 60-byte record, the knob it borrows. */
+/* core_params' entries: the id, the 60-byte record, the knob it borrows.
+ * The tenth field is the record's mod-destination mask: a DEST list offers
+ * a parameter whose mask has all its bits, LFO1's 0xe00, LFO2's 0x600, the
+ * velocity and controller lists 0x200 (0x40045110, 0x400c7dc6). SPD has
+ * 0xe00, as the filter's and the synth's parameters: with its slot in the
+ * sound slot table (map_slots), both LFOs offer it, "AMP:Table Speed". The
+ * velocity and controller lists offer it too, but they modulate only the
+ * render's copy of the slot, which digitables does not read. */
+#define MOD_DEST  0xe00
 const struct {
     long id;
     struct param rec;
@@ -189,8 +200,8 @@ const struct {
     LOOK_PTIM
 }, digitables_spd_param = {
     SPD_ID,
-    { 1, SPD_SLOT, SPD_MIN * 256, SPD_MAX << 8, 0, 0, -1, -1, -1, 0,
-      "Speed", STR_AMP, "SPD", digitables_spd_format, STR_EMPTY },
+    { 1, SPD_SLOT, SPD_MIN * 256, SPD_MAX << 8, 0, 0, -1, -1, -1, MOD_DEST,
+      "Table Speed", STR_AMP, "SPD", digitables_spd_format, STR_EMPTY },
     LOOK_PTIM
 };
 
@@ -408,11 +419,46 @@ static int table_next(const struct table *t, int n)
     return t->loop;
 }
 
+/* ---- The LFOs on SPD -----------------------------------------------------
+ * The firmware's LFO engine (0x400feaee, in the render, every block) runs
+ * each voice's two LFOs and keeps, in each LFO's state, its destination
+ * slot (+0x40) and its modulation in 8.8 parameter units (+0x44, signed);
+ * LFO1's state is at 0x419ea314 + 0x50 v, LFO2's 0x28 after it. It also adds
+ * the modulation into the render's copy of the slot, clamped to 0..127,
+ * which would cut off SPD's fast end (stored below 0); digitables takes the
+ * amount itself instead. The amount at full DEP (64) is 64 parameter steps
+ * either way, half a stock parameter's range; digitables takes a quarter,
+ * 16 of SPD's 34 values either way, half its range, as on a stock one. */
+#define SLOT_IDS  ((volatile unsigned long *)0x40528644)   /* sound slot -> id */
+#define LFO_STATE(v, i) ((volatile long *)(0x419ea314 + 0x50 * (v) + 0x28 * (i)))
+#define LFO_DEST  (0x40 / 4)
+#define LFO_AMOUNT (0x44 / 4)
+
+/* The DEST lists offer what the sound slot table (built once, at boot, from
+ * the firmware's own parameters) maps; SPD's slot maps to nothing until
+ * digitables puts its id there. */
+static void map_slots(void)
+{
+    if (SLOT_IDS[SPD_SLOT] == 0)
+        SLOT_IDS[SPD_SLOT] = SPD_ID;
+}
+
+static long lfo_spd(int v)
+{
+    long m = 0;
+    int i;
+    for (i = 0; i < 2; i++)
+        if (LFO_STATE(v, i)[LFO_DEST] == SPD_SLOT)
+            m += LFO_STATE(v, i)[LFO_AMOUNT];
+    return m / 4;
+}
+
 /* Timeline units a step for voice v, or 0 for a step every audio block.
- * Read every block: turning SPD while a note plays changes its speed. */
+ * Read every block: turning SPD, or an LFO on it, changes the speed of a
+ * note already playing. */
 static unsigned long step_len(int v)
 {
-    int spd = VPARAM(v, SPD_SLOT) >> 8;
+    long spd = (VPARAM(v, SPD_SLOT) + lfo_spd(v) + 128) >> 8;
     if (spd > SPD_MAX)
         spd = SPD_MAX;
     if (spd >= 0)
@@ -636,10 +682,19 @@ void digitables_menu_open(void *brain, void *ev, int track)
     core_page_open(brain, ev, KEY_AMP, &digitables_tbl_page);
 }
 
+/* Its icon in core-dn1 2.3's grid: 16 rows, bit 15 the left pixel; table
+ * 1's default, 0 +12 +7 +3, as bars. Core 2.2 reads only the name and open. */
+static const unsigned short digitables_icon[16] = {
+    0x0000, 0x0e00, 0x0e00, 0x0e00, 0x0e00, 0x0ee0, 0x0ee0, 0x0ee0,
+    0x0eee, 0x0eee, 0x0eee, 0xeeee, 0xeeee, 0x0000, 0xffff, 0x0000
+};
+
 const struct {
     const char *name;
     void (*open)(void *brain, void *ev, int track);
-} digitables_menu = { "TABLES", digitables_menu_open };
+    unsigned long tag;                  /* 0x49434F4E, "ICON": an icon follows */
+    const unsigned short *icon;
+} digitables_menu = { "TABLES", digitables_menu_open, 0x49434F4EUL, digitables_icon };
 
 /* Knobs (core's ev_enc): +12 the encoder, 1-8 for A-H; +16 the turn. In the
  * editor: A the step's offset, B the step, C the length, D the loop point
@@ -703,6 +758,7 @@ void digitables_tick(void *ctrl)
         bank_defaults();                /* the first boot's install */
         bank_ready = 1;
     }
+    map_slots();
     if (digitables_ed_open)
         *((unsigned char *)ctrl + 0x20) = 1;    /* redraw: the playhead moves */
 }

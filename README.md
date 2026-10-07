@@ -35,6 +35,21 @@ stock ones, and p-lockable per trig (hold a trig in grid recording and turn
 the knob), so one trig can play another table, or none, or at another speed.
 Turning SPD while a note plays changes its speed from the next step.
 
+### An LFO on the speed
+
+Both LFOs can move the table's speed. On the LFO page, turn DEST to
+**AMP:Table Speed** (the last entry in the list) and confirm with YES. The
+LFO's own SPD, MULT, WAVE, SPH, MODE and FADE work as for any destination.
+DEP sets how far it moves SPD, in proportion to its range as on a stock
+parameter: DEP 8 swings SPD 2 values either way, DEP 32 eight, and the full
+DEP (64) sixteen, so from SPD 6 an LFO reaches both ends, 22 ticks a step
+and MAX. Positive DEP slows the table on the top half of the wave and speeds
+it up on the bottom half; negative DEP does the opposite.
+
+A slow sine at a small depth makes a table drift ahead of the beat and back;
+a square wave flips between two speeds; a ramp with MODE TRIG makes every
+note start fast and slow down, or the other way round.
+
 ### The table editor
 
 On the TBL page, hold a track key: the editor fills the screen with the
@@ -183,7 +198,13 @@ core-dn1 2.2 is elekloader's `mods/core-dn1` (pull requests
   copy of the trig's note event, the way the arpeggiator queues its notes,
   and released through the voice's length counter. digitables keeps its
   own copy of the event and its p-locks (never a pointer into the
-  firmware's pools), and skips the note when a pool is short.
+  firmware's pools), and skips the note when a pool is short;
+- for the LFOs: SPD's record carries the filter's modulation-destination
+  mask, and digitables maps sound slot 65 to SPD in the firmware's sound slot
+  table (the DEST lists are made from it; the firmware builds it once, at
+  boot, from its own parameters only). The firmware's LFO engine then
+  keeps each voice's LFO destination and modulation every block, and
+  digitables adds the modulation to SPD itself.
 
 ## Known limits
 
@@ -197,6 +218,9 @@ core-dn1 2.2 is elekloader's `mods/core-dn1` (pull requests
   an added note takes one like any note (the oldest is stolen when none is
   free). A loop over ADD steps adds notes over and over, stealing voices
   as it goes.
+- Only the LFOs move SPD. The velocity and MIDI controller modulation lists
+  offer Table Speed too (the firmware has one mask for them and LFO1), but
+  choosing it there does nothing yet.
 - OS 1.43 only (core-dn1 2.2 has OS 1.44 too; digitables does not yet).
 
 ## Licence
